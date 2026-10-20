@@ -237,7 +237,6 @@ ExtMove* MovePicker::score(const MoveList<Type>& ml) {
     }
     else
     {
-        const Position& position = pos;
         // Loop invariants, looked up once per call instead of once per move.
         const auto&           mainHist = (*mainHistory)[us];
         const auto&           pawnHist = sharedHistory->pawn_entry(pos);
@@ -255,13 +254,9 @@ ExtMove* MovePicker::score(const MoveList<Type>& ml) {
             m          = move;
 
             const Square    to   = m.to_sq();
-            const Piece     pc   = position.moved_piece(m);
+            const Piece     pc   = pos.moved_piece(m);
             const Square    from = m.from_sq();
             const PieceType pt   = type_of(pc);
-
-            // Compute checks before loading history values across the SEE call.
-            const int checkBonus =
-              ((position.check_squares(pt) & to) && position.see_ge(m, -75)) * 16384;
 
             // histories
             int value = 2 * mainHist[m.raw()];
@@ -273,7 +268,7 @@ ExtMove* MovePicker::score(const MoveList<Type>& ml) {
             value += cont5[pc][to];
 
             // bonus for checks
-            value += checkBonus;
+            value += ((pos.check_squares(pt) & to) && pos.see_ge(m, -75)) * 16384;
 
             // penalty for moving to a square threatened by a lesser piece
             // or bonus for escaping an attack by a lesser piece.
