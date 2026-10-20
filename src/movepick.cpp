@@ -51,6 +51,17 @@ enum Stages {
     QCAPTURE
 };
 
+// Move-ordering units, not evaluation units. Capturing pawns disappear in Atomic.
+constexpr int PawnPushPriority[RANK_NB] = {0, 0, 16, 32, 64, 128, 256, 512};
+
+int pawn_push_priority(const Position& pos, Move move) {
+    if (type_of(pos.moved_piece(move)) != PAWN)
+        return 0;
+
+    const int priority = PawnPushPriority[relative_rank(pos.side_to_move(), move.to_sq())];
+    return pos.capture(move) ? priority >> 1 : priority;
+}
+
 #ifdef USE_AVX512
 // Load the Move, and the ExtMove value, into all lanes of 512-bit registers
 static void splat_extmove(const ExtMove& m, __m512i& move, __m512i& value) {
@@ -215,10 +226,18 @@ ExtMove* MovePicker::score(const MoveList<Type>& ml) {
             const Piece  capturedPiece = pos.piece_on(to);
             m.value =
               captureHist[pc][to][type_of(capturedPiece)] + 7 * int(PieceValue[capturedPiece]);
+
+            // Queen promotions are in CAPTURES, with or without a capture.
+            if (type_of(pc) == PAWN)
+            {
+                const int priority = PawnPushPriority[relative_rank(us, to)];
+                m.value += pos.capture(m) ? priority >> 1 : priority;
+            }
         }
     }
     else
     {
+        const Position& position = pos;
         // Loop invariants, looked up once per call instead of once per move.
         const auto&           mainHist = (*mainHistory)[us];
         const auto&           pawnHist = sharedHistory->pawn_entry(pos);
@@ -236,9 +255,13 @@ ExtMove* MovePicker::score(const MoveList<Type>& ml) {
             m          = move;
 
             const Square    to   = m.to_sq();
-            const Piece     pc   = pos.moved_piece(m);
+            const Piece     pc   = position.moved_piece(m);
             const Square    from = m.from_sq();
             const PieceType pt   = type_of(pc);
+
+            // Compute checks before loading history values across the SEE call.
+            const int checkBonus =
+              ((position.check_squares(pt) & to) && position.see_ge(m, -75)) * 16384;
 
             // histories
             int value = 2 * mainHist[m.raw()];
@@ -250,7 +273,7 @@ ExtMove* MovePicker::score(const MoveList<Type>& ml) {
             value += cont5[pc][to];
 
             // bonus for checks
-            value += ((pos.check_squares(pt) & to) && pos.see_ge(m, -75)) * 16384;
+            value += checkBonus;
 
             // penalty for moving to a square threatened by a lesser piece
             // or bonus for escaping an attack by a lesser piece.
@@ -259,6 +282,9 @@ ExtMove* MovePicker::score(const MoveList<Type>& ml) {
 
             if (lowPlyRow)
                 value += 8 * (*lowPlyRow)[m.raw()] / lowPlyDiv;
+
+            if (pt == PAWN)
+                value += PawnPushPriority[relative_rank(us, to)];
 
             m.value = value;
         }
@@ -309,7 +335,9 @@ top:
 
     case GOOD_CAPTURE :
         if (select([&]() {
-                if (pos.see_ge(*cur, -cur->value / 18))
+                // Pawn priority changes ordering, not the capture acceptance threshold.
+                const int captureScore = cur->value - pawn_push_priority(pos, *cur);
+                if (pos.see_ge(*cur, -captureScore / 18))
                     return true;
                 std::swap(*endBadCaptures++, *cur);
                 return false;
